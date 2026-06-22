@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
-import type { Briefing, CategoryId, Lang, Lens, WatchResult } from "./types";
+import type { Briefing, CategoryId, Lang, Lens } from "./types";
 import { CATEGORIES, t } from "./i18n";
-import { fetchBriefings } from "./api";
+import { fetchBriefingsBatched } from "./api";
 import { briefingKey, db, removeBriefing, saveBriefing } from "./db";
 import { BriefingCard } from "./components/BriefingCard";
 import { Controls } from "./components/Controls";
@@ -31,7 +31,10 @@ export default function App() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<WatchResult | null>(null);
+  const [partial, setPartial] = useState(false);
+  const [briefings, setBriefings] = useState<Briefing[]>([]);
+  const [meta, setMeta] = useState<{ webSearchUsed: boolean; dated: boolean; asOf: string } | null>(null);
+  const [progress, setProgress] = useState<{ found: number; target: number } | null>(null);
 
   useEffect(() => localStorage.setItem(LS.lang, lang), [lang]);
   useEffect(() => localStorage.setItem(LS.lens, lens), [lens]);
@@ -60,30 +63,46 @@ export default function App() {
     if (selected.size === 0 || loading) return;
     setLoading(true);
     setError(null);
+    setPartial(false);
+    setBriefings([]);
+    setMeta(null);
+    setProgress({ found: 0, target: count });
+    setView("feed");
     try {
-      const res = await fetchBriefings({
-        lens,
-        lang,
-        categories: [...selected],
-        count,
-      });
-      setResult(res);
-      setView("feed");
+      const outcome = await fetchBriefingsBatched(
+        { lens, lang, categories: [...selected], count },
+        {
+          onBatch: (fresh) => {
+            setBriefings((prev) => [...prev, ...fresh]);
+            setProgress((p) => (p ? { ...p, found: p.found + fresh.length } : p));
+          },
+          onMeta: (m) => setMeta(m),
+        },
+      );
+      if (outcome.total === 0) {
+        setError(
+          lang === "fr"
+            ? "Le radar n'a rien rapporté cette fois. Réessaie."
+            : "The radar came back empty this time. Try again.",
+        );
+      } else if (outcome.failed > 0) {
+        setPartial(true);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+      setProgress(null);
     }
   }
 
   async function toggleSave(b: Briefing) {
     const id = briefingKey(b);
     if (savedIds.has(id)) await removeBriefing(id);
-    else await saveBriefing(b, lens, result?.asOf ?? new Date().toISOString().slice(0, 10));
+    else await saveBriefing(b, lens, meta?.asOf ?? new Date().toISOString().slice(0, 10));
   }
 
   const marquee = lang === "fr" ? MARQUEE_FR : MARQUEE_EN;
-  const briefings = result?.briefings ?? [];
 
   return (
     <div className="min-h-dvh">
@@ -176,12 +195,12 @@ export default function App() {
               />
             </div>
 
-            {result && !loading && (
+            {meta && (
               <div className="mb-5 flex flex-wrap items-center gap-2 text-xs">
-                {result.webSearchUsed ? (
+                {meta.webSearchUsed ? (
                   <span className="chip border-lime/50 bg-lime/10 text-lime">
                     <span className="h-2 w-2 animate-pulseGlow rounded-full bg-lime" />
-                    {t("webLiveFull", lang)} · {t("asOf", lang)} {result.asOf}
+                    {t("webLiveFull", lang)} · {t("asOf", lang)} {meta.asOf}
                   </span>
                 ) : (
                   <span className="chip border-amber/50 bg-amber/10 text-amber">⚠ {t("webDated", lang)}</span>
@@ -189,9 +208,45 @@ export default function App() {
               </div>
             )}
 
-            {loading && <Loading lang={lang} />}
+            {/* Cards stream in as each batch lands — visible even mid-scan. */}
+            {briefings.length > 0 && (
+              <div className="grid gap-4 sm:grid-cols-2">
+                {briefings.map((b, i) => (
+                  <BriefingCard
+                    key={`${briefingKey(b)}-${i}`}
+                    briefing={b}
+                    lang={lang}
+                    saved={savedIds.has(briefingKey(b))}
+                    onToggleSave={() => toggleSave(b)}
+                    index={i}
+                  />
+                ))}
+              </div>
+            )}
 
-            {error && !loading && (
+            {/* Streaming indicator — batches still coming in. */}
+            {loading && (
+              <div className={briefings.length > 0 ? "mt-6" : ""}>
+                <Loading lang={lang} />
+                {progress && (
+                  <p className="mt-3 text-center font-mono text-xs uppercase tracking-widest text-muted">
+                    {progress.found}/{progress.target} {lang === "fr" ? "trouvés…" : "found…"}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Some batches failed but we still have results — never a blank screen. */}
+            {partial && !loading && briefings.length > 0 && (
+              <div className="mt-6 rounded-xl border border-amber/40 bg-amber/[0.07] px-4 py-3 text-center text-sm text-amber">
+                {lang === "fr"
+                  ? "Quelques lots n'ont pas répondu — voici ce qu'on a trouvé. Relance pour compléter."
+                  : "A few batches didn't answer — here's what we found. Run again to top up."}
+              </div>
+            )}
+
+            {/* Hard error: only when there's nothing at all to show. */}
+            {error && !loading && briefings.length === 0 && (
               <div className="rounded-2xl border border-amber/40 bg-amber/[0.07] p-5 text-center">
                 <p className="display text-lg text-amber">{t("error", lang)}</p>
                 <p className="mt-2 text-sm text-cloud/80">{error}</p>
@@ -204,27 +259,13 @@ export default function App() {
               </div>
             )}
 
+            {/* Initial empty state. */}
             {!loading && !error && briefings.length === 0 && (
               <div className="rounded-2xl border border-dashed border-void-line bg-void-soft/40 p-10 text-center">
                 <div className="mb-3 text-5xl" aria-hidden>
                   📡
                 </div>
                 <p className="mx-auto max-w-md text-sm text-muted">{t("empty", lang)}</p>
-              </div>
-            )}
-
-            {!loading && briefings.length > 0 && (
-              <div className="grid gap-4 sm:grid-cols-2">
-                {briefings.map((b, i) => (
-                  <BriefingCard
-                    key={`${briefingKey(b)}-${i}`}
-                    briefing={b}
-                    lang={lang}
-                    saved={savedIds.has(briefingKey(b))}
-                    onToggleSave={() => toggleSave(b)}
-                    index={i}
-                  />
-                ))}
               </div>
             )}
           </>

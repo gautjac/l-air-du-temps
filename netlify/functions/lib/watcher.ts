@@ -37,6 +37,10 @@ export interface WatchRequest {
   lang?: Lang;
   categories?: CategoryId[];
   count?: number;
+  /** Titles already covered by sibling batches — Claude must NOT repeat them. */
+  avoid?: string[];
+  /** Lifecycle angle to emphasise for this batch, for cross-batch diversity. */
+  angle?: string;
 }
 
 export interface WatchResult {
@@ -94,15 +98,60 @@ const SUBMIT_TOOL: Anthropic.Tool = {
   },
 };
 
+// Each web_search round-trip costs ~8–10s, and a single invocation must finish
+// under Netlify's ~45–55s function wall or the stream gets killed before the
+// result line. Latency is dominated by search COUNT, not item count, so we cap
+// searches hard (2) and keep batches tiny. The client fans out many small
+// batches instead of one slow call, so total coverage stays high.
 const WEB_SEARCH_TOOL: Anthropic.WebSearchTool20250305 = {
   type: "web_search_20250305",
   name: "web_search",
-  max_uses: 6,
+  max_uses: 2,
+};
+
+const ANGLE_HINT: Record<string, { fr: string; en: string }> = {
+  rising: {
+    fr: "Pour ce lot, priorise des tendances en pleine MONTÉE (rising) — fraîches, pas encore mainstream.",
+    en: "For this batch, prioritise RISING trends — fresh, not yet mainstream.",
+  },
+  fading: {
+    fr: "Pour ce lot, priorise des tendances qui RETOMBENT (fading) — encore visibles mais sur le déclin.",
+    en: "For this batch, prioritise FADING trends — still visible but on the way down.",
+  },
+  mainstream: {
+    fr: "Pour ce lot, priorise des tendances qui viennent de PERCER dans le grand public.",
+    en: "For this batch, prioritise trends that just BROKE into the mainstream.",
+  },
+  niche: {
+    fr: "Pour ce lot, priorise des tendances de NICHE / underground qu'un initié connaîtrait.",
+    en: "For this batch, prioritise NICHE / underground trends an insider would know.",
+  },
+  peak: {
+    fr: "Pour ce lot, priorise des tendances à leur PIC (peak) — partout en ce moment.",
+    en: "For this batch, prioritise PEAK trends — everywhere right now.",
+  },
+  over: {
+    fr: "Pour ce lot, priorise des tendances déjà FINIES (over) — à connaître comme référence, pas à poster.",
+    en: "For this batch, prioritise trends that are already OVER — worth knowing as reference, not to post.",
+  },
 };
 
 function buildPrompt(req: Required<WatchRequest>, today: string): string {
-  const { lens, lang, categories, count } = req;
+  const { lens, lang, categories, count, avoid, angle } = req;
   const catList = categories.map((c) => `- ${CATEGORY_LABELS[c][lang]} (id: ${c})`).join("\n");
+
+  const angleBlock = angle && ANGLE_HINT[angle] ? `\n\n${ANGLE_HINT[angle][lang]}` : "";
+
+  const avoidBlock =
+    avoid && avoid.length
+      ? lang === "fr"
+        ? `\n\nDÉJÀ COUVERT — ne répète AUCUN de ces sujets, trouve des tendances DIFFÉRENTES :\n${avoid
+            .map((a) => `- ${a}`)
+            .join("\n")}`
+        : `\n\nALREADY COVERED — do NOT repeat ANY of these, find DIFFERENT trends:\n${avoid
+            .map((a) => `- ${a}`)
+            .join("\n")}`
+      : "";
 
   const lensBlock =
     lens === "quebec"
@@ -122,18 +171,18 @@ function buildPrompt(req: Required<WatchRequest>, today: string): string {
 
 ${lensBlock}
 
-Use the web_search tool to actually find what is CURRENTLY bubbling on the internet (last few weeks). Search for current memes, formats, slang, sound/music trends, discourse, drama, and microtrends. Do NOT rely on stale memory — search the live web. Run several searches across the requested categories before answering.
+Use the web_search tool to find what is CURRENTLY bubbling (last few weeks). Be FAST and decisive: run at most 2 quick, well-aimed searches, then submit — do not over-search. Do NOT rely on stale memory; one good search beats five vague ones.
 
 REQUESTED CATEGORIES (only return briefings in these):
 ${catList}
 
-Produce about ${count} briefings total, spread across the requested categories. For EACH trend, fully EXPLAIN it — the explainer is the product. Each briefing must answer: what is it, where did it come from, why does it resonate, what lifecycle stage is it at (rising/peak/fading/over) with an approximate age, a concrete example, where to go see it, and an honest "are you late?" verdict.
+Produce exactly ${count} briefings, spread across the requested categories. For EACH trend, fully EXPLAIN it — the explainer is the product. Each briefing must answer: what is it, where did it come from, why does it resonate, what lifecycle stage is it at (rising/peak/fading/over) with an approximate age, a concrete example, where to go see it, and an honest "are you late?" verdict.
 
 ${voice}
 
-Pick real, specific, currently-relevant trends — not evergreen generic ones. Prefer things a culture-literate friend would actually text you about this month. Vary the lifecycle stages (some rising, some peaking, some fading, a couple already over so the reader knows what to skip).
+Pick real, specific, currently-relevant trends — not evergreen generic ones. Prefer things a culture-literate friend would actually text you about this month.${angleBlock}${avoidBlock}
 
-When done, call submit_briefings exactly once with the structured set. Do not write a prose answer.`;
+Keep it tight: run a few focused searches, then submit. When done, call submit_briefings exactly once with the structured set. Do not write a prose answer.`;
 }
 
 interface RunOpts {
@@ -154,7 +203,7 @@ async function runOnce(req: Required<WatchRequest>, today: string, opts: RunOpts
 
   const message = await client.messages.create({
     model: MODEL,
-    max_tokens: 8000,
+    max_tokens: 4000,
     tools,
     tool_choice,
     messages: [{ role: "user", content: buildPrompt(req, today) }],
@@ -187,7 +236,10 @@ export async function watch(reqIn: WatchRequest): Promise<WatchResult> {
       reqIn.categories && reqIn.categories.length
         ? reqIn.categories.filter((c) => CAT_ENUM.includes(c))
         : [...CAT_ENUM],
-    count: Math.min(Math.max(reqIn.count ?? 8, 3), 12),
+    // Per-call batch size: small so each invocation finishes under the function wall.
+    count: Math.min(Math.max(reqIn.count ?? 3, 1), 4),
+    avoid: Array.isArray(reqIn.avoid) ? reqIn.avoid.slice(0, 40) : [],
+    angle: typeof reqIn.angle === "string" ? reqIn.angle : "",
   };
   if (req.categories.length === 0) req.categories = [...CAT_ENUM];
 

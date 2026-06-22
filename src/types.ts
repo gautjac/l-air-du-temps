@@ -37,6 +37,10 @@ export interface WatchRequest {
   lang: Lang;
   categories: CategoryId[];
   count: number;
+  /** Titles already covered by sibling batches — avoid repeating them. */
+  avoid?: string[];
+  /** Lifecycle angle to emphasise for this batch (cross-batch diversity). */
+  angle?: string;
 }
 
 /** A briefing saved to the local glossary collection. */

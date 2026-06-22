@@ -1,0 +1,85 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-void text-cloud font-sans antialiased;
+    background-image:
+      radial-gradient(60% 50% at 15% 0%, rgba(255, 45, 155, 0.16), transparent 70%),
+      radial-gradient(55% 50% at 100% 10%, rgba(34, 227, 255, 0.14), transparent 70%),
+      linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+    background-size:
+      auto, auto, 44px 44px, 44px 44px;
+    background-attachment: fixed;
+    min-height: 100dvh;
+  }
+
+  ::selection {
+    @apply bg-magenta text-void;
+  }
+}
+
+@layer components {
+  .display {
+    font-family: "Archivo Black", system-ui, sans-serif;
+    letter-spacing: -0.01em;
+    line-height: 0.95;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-void-line px-3 py-1.5 text-xs font-semibold uppercase tracking-wide transition;
+  }
+
+  .label {
+    @apply text-[0.62rem] font-bold uppercase tracking-[0.18em] text-muted;
+  }
+
+  .neon-text {
+    text-shadow: 0 0 22px rgba(255, 45, 155, 0.55);
+  }
+
+  .cyan-text {
+    text-shadow: 0 0 22px rgba(34, 227, 255, 0.5);
+  }
+}
+
+/* Custom scrollbar — internet-native, dark */
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0612;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a1b45;
+  border-radius: 999px;
+  border: 2px solid #0a0612;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #ff2d9b;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  html {
+    scroll-behavior: auto;
+  }
+}

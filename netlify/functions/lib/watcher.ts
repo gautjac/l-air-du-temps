@@ -136,7 +136,13 @@ const ANGLE_HINT: Record<string, { fr: string; en: string }> = {
   },
 };
 
-function buildPrompt(req: Required<WatchRequest>, today: string): string {
+/**
+ * The prompt comes in two parts. `head` is the same for every batch of a scan
+ * (lens, categories, count, voice), so it carries the cache breakpoint and,
+ * with the tools ahead of it, is read from cache by the later batches. `tail`
+ * is what each batch changes: its angle and the titles to avoid.
+ */
+function buildPrompt(req: Required<WatchRequest>, today: string): { head: string; tail: string } {
   const { lens, lang, categories, count, avoid, angle } = req;
   const catList = categories.map((c) => `- ${CATEGORY_LABELS[c][lang]} (id: ${c})`).join("\n");
 
@@ -167,7 +173,7 @@ function buildPrompt(req: Required<WatchRequest>, today: string): string {
       ? `Écris en français québécois, vif et internet-native, mais clair et juste. Tutoie le lecteur ("t'es en retard", "ça vient de"). Sois honnête : si une tendance est déjà morte, dis-le. Pas de jargon creux, pas d'inventions.`
       : `Write in lively, internet-native English. Be honest: if a trend is already dead, say so. No empty jargon, no fabrications.`;
 
-  return `Today is ${today}. You are the editorial brain of "L'Air du temps", a culture radar for a Québécois filmmaker/musician who wants to understand the references he's missing — RIGHT NOW.
+  const head = `Today is ${today}. You are the editorial brain of "L'Air du temps", a culture radar for a Québécois filmmaker/musician who wants to understand the references he's missing — RIGHT NOW.
 
 ${lensBlock}
 
@@ -180,9 +186,13 @@ Produce exactly ${count} briefings, spread across the requested categories. For 
 
 ${voice}
 
-Pick real, specific, currently-relevant trends — not evergreen generic ones. Prefer things a culture-literate friend would actually text you about this month.${angleBlock}${avoidBlock}
+Pick real, specific, currently-relevant trends — not evergreen generic ones. Prefer things a culture-literate friend would actually text you about this month.`;
 
-Keep it tight: run a few focused searches, then submit. When done, call submit_briefings exactly once with the structured set. Do not write a prose answer.`;
+  const tail = `${angleBlock}${avoidBlock}
+
+Keep it tight: run a few focused searches, then submit. When done, call submit_briefings exactly once with the structured set. Do not write a prose answer.`.trimStart();
+
+  return { head, tail };
 }
 
 interface RunOpts {
@@ -201,13 +211,26 @@ async function runOnce(req: Required<WatchRequest>, today: string, opts: RunOpts
     ? { type: "auto" }
     : { type: "tool", name: "submit_briefings" };
 
+  const { head, tail } = buildPrompt(req, today);
   const message = await client.messages.create({
     model: MODEL,
     max_tokens: 4000,
     tools,
     tool_choice,
-    messages: [{ role: "user", content: buildPrompt(req, today) }],
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: head, cache_control: { type: "ephemeral" } },
+          { type: "text", text: tail },
+        ],
+      },
+    ],
   });
+  const u = message.usage;
+  console.log(
+    `[l-air-du-temps] ${opts.useWebSearch ? "web" : "dated"}: input=${u.input_tokens} cache_read=${u.cache_read_input_tokens ?? 0} cache_write=${u.cache_creation_input_tokens ?? 0} output=${u.output_tokens}`,
+  );
 
   const block = message.content.find(
     (b): b is Anthropic.ToolUseBlock => b.type === "tool_use" && b.name === "submit_briefings",

@@ -65,6 +65,15 @@ export async function fetchBriefings(req: WatchRequest): Promise<WatchResult> {
 
 const BATCH_SIZE = 2;
 const CONCURRENCY = 2;
+/**
+ * The first batch's head start before the rest of the pool joins. Every batch
+ * sends the same tools and prompt head, and that prefix is cached — but a
+ * cache entry only becomes readable once the request writing it has started
+ * answering, so batches fired together would all pay full price. A few seconds
+ * covers the first batch's prompt (it then spends ~30 s searching and writing);
+ * the pool also joins as soon as that batch settles, if it is quicker.
+ */
+export const HEAD_START_MS = 4000;
 // Lifecycle angles rotated across batches so parallel calls diverge instead of
 // returning the same handful of obvious trends.
 const ANGLES = ["rising", "fading", "mainstream", "niche", "peak", "over"];
@@ -102,6 +111,12 @@ export async function fetchBriefingsBatched(
   let launched = 0;
   let done = false;
 
+  let firstSettled = () => {};
+  const headStart = Promise.race([
+    new Promise<void>((resolve) => setTimeout(resolve, HEAD_START_MS)),
+    new Promise<void>((resolve) => (firstSettled = resolve)),
+  ]);
+
   async function worker() {
     while (!done) {
       const i = launched++;
@@ -135,14 +150,19 @@ export async function fetchBriefingsBatched(
         }
       } catch {
         failed += 1;
+      } finally {
+        if (i === 0) firstSettled();
       }
 
       if (total >= target) done = true;
     }
   }
 
+  // The first worker takes batch 0 alone; the others wait out its head start.
   await Promise.all(
-    Array.from({ length: Math.min(CONCURRENCY, maxBatches) }, () => worker()),
+    Array.from({ length: Math.min(CONCURRENCY, maxBatches) }, (_, k) =>
+      k === 0 ? worker() : headStart.then(worker),
+    ),
   );
 
   return { total, failed, batches: launched };
